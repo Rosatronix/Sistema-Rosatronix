@@ -8,6 +8,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
   /* =====================================================================
      SISTEMA DE TEMAS — dos ejes independientes
@@ -1540,8 +1541,14 @@ async function pintarConfigEmpresa(){
       </div>
       <button class="btn btn-ghost" id="btn-respaldo">Descargar respaldo completo (.xlsx)</button>
     </div>
+    <div class="panel">
+      <h3>Respaldo automático a Google Drive</h3>
+      <div class="desc" style="margin:-8px 0 14px; font-size:12.5px;">Guarda el mismo respaldo directo en tu Google Drive, sin descargarlo primero. La primera vez te va a pedir conectar tu cuenta de Google.</div>
+      <div id="config-drive-contenido"><div class="vacio">Cargando…</div></div>
+    </div>
   `;
   document.getElementById('btn-respaldo').addEventListener('click', generarRespaldoCompleto);
+  cargarConfigDrive();
   cargarTablaEmpresas();
   document.getElementById('form-empresa').addEventListener('submit', async (ev)=>{
     ev.preventDefault();
@@ -1645,34 +1652,138 @@ async function subirLogo(archivo){
   return publico.publicUrl;
 }
 
-async function generarRespaldoCompleto(){
-  const btn = document.getElementById('btn-respaldo');
-  const textoOriginal = btn.textContent;
-  btn.disabled = true; btn.textContent = 'Generando respaldo…';
+async function generarLibroRespaldo(){
   const tablasPorEmpresa = [
     'proveedores', 'clientes_credito', 'cuentas', 'categorias_gasto', 'metodos_pago',
     'cuentas_por_pagar', 'pagos_realizados', 'cuentas_por_cobrar', 'cobros_recibidos',
     'recibos', 'gastos_recurrentes', 'movimientos_caja', 'empleados', 'pagos_planilla',
     'auditoria',
   ];
+  const resultados = await Promise.all(tablasPorEmpresa.map(t => sb.from(t).select('*').eq('empresa_id', ESTADO.empresaActual)));
+  const libro = XLSX.utils.book_new();
+  tablasPorEmpresa.forEach((t, i) => {
+    const filas = resultados[i].data || [];
+    const hoja = XLSX.utils.json_to_sheet(filas.length ? filas : [{ aviso: 'Sin datos' }]);
+    XLSX.utils.book_append_sheet(libro, hoja, t.slice(0, 31));
+  });
+  const hojaEmpresa = XLSX.utils.json_to_sheet([ESTADO.empresa || {}]);
+  XLSX.utils.book_append_sheet(libro, hojaEmpresa, 'empresa');
+  return libro;
+}
+
+function nombreArchivoRespaldo(){
+  const nombreEmpresa = (ESTADO.empresa?.nombre || 'empresa').replace(/[^a-z0-9]+/gi, '_');
+  return `respaldo_${nombreEmpresa}_${new Date().toISOString().slice(0, 10)}.xlsx`;
+}
+
+async function generarRespaldoCompleto(){
+  const btn = document.getElementById('btn-respaldo');
+  const textoOriginal = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Generando respaldo…';
   try{
-    const resultados = await Promise.all(tablasPorEmpresa.map(t => sb.from(t).select('*').eq('empresa_id', ESTADO.empresaActual)));
-    const libro = XLSX.utils.book_new();
-    tablasPorEmpresa.forEach((t, i) => {
-      const filas = resultados[i].data || [];
-      const hoja = XLSX.utils.json_to_sheet(filas.length ? filas : [{ aviso: 'Sin datos' }]);
-      XLSX.utils.book_append_sheet(libro, hoja, t.slice(0, 31));
-    });
-    const hojaEmpresa = XLSX.utils.json_to_sheet([ESTADO.empresa || {}]);
-    XLSX.utils.book_append_sheet(libro, hojaEmpresa, 'empresa');
-    const nombreArchivo = (ESTADO.empresa?.nombre || 'empresa').replace(/[^a-z0-9]+/gi, '_');
-    XLSX.writeFile(libro, `respaldo_${nombreArchivo}_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    const libro = await generarLibroRespaldo();
+    XLSX.writeFile(libro, nombreArchivoRespaldo());
     mostrarToast('Respaldo descargado.');
   }catch(err){
     mostrarToast('No se pudo generar el respaldo.'); console.error(err);
   }finally{
     btn.disabled = false; btn.textContent = textoOriginal;
   }
+}
+
+/* ---------- Respaldo automático a Google Drive ----------
+   Usa Google Identity Services (carga aparte en el <head>) con el
+   scope "drive.file", que solo deja al panel tocar los archivos que
+   ÉL MISMO sube — nunca el resto del Drive de quien se conecte. */
+let clienteTokenDrive = null;
+
+function inicializarClienteDrive(clientId){
+  if(!window.google || !window.google.accounts || !clientId) return null;
+  if(clienteTokenDrive && clienteTokenDrive._clientId === clientId) return clienteTokenDrive;
+  clienteTokenDrive = google.accounts.oauth2.initTokenClient({
+    client_id: clientId,
+    scope: 'https://www.googleapis.com/auth/drive.file',
+    callback: '',
+  });
+  clienteTokenDrive._clientId = clientId;
+  return clienteTokenDrive;
+}
+
+function pedirTokenDrive(clientId, callback){
+  const cliente = inicializarClienteDrive(clientId);
+  if(!cliente){ mostrarToast('No se pudo cargar Google. Revisa el Client ID.'); return; }
+  cliente.callback = (resp) => {
+    if(resp.error){ mostrarToast('No se pudo conectar con Google Drive.'); return; }
+    callback(resp.access_token);
+  };
+  cliente.requestAccessToken();
+}
+
+async function subirRespaldoADrive(accessToken){
+  const libro = await generarLibroRespaldo();
+  const binario = XLSX.write(libro, { bookType: 'xlsx', type: 'array' });
+  const blob = new Blob([binario], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  const metadata = { name: nombreArchivoRespaldo(), mimeType: blob.type };
+  const form = new FormData();
+  form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
+  form.append('file', blob);
+  const resp = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}` },
+    body: form,
+  });
+  if(!resp.ok) throw new Error('Error subiendo a Drive: ' + resp.status);
+  return resp.json();
+}
+
+async function cargarConfigDrive(){
+  const cont = document.getElementById('config-drive-contenido');
+  if(!cont) return;
+  const { data } = await sb.from('config_respaldo').select('*').eq('empresa_id', ESTADO.empresaActual).maybeSingle();
+  const clientIdGuardado = data?.google_client_id || '';
+  const ultimoRespaldo = data?.ultimo_respaldo_en ? new Intl.DateTimeFormat('es-GT', {dateStyle:'medium', timeStyle:'short'}).format(new Date(data.ultimo_respaldo_en)) : 'Nunca';
+
+  cont.innerHTML = `
+    <div class="campo-inline" style="margin-bottom:12px;">
+      <label>Client ID de Google (de Google Cloud Console)</label>
+      <input id="drive-client-id" value="${clientIdGuardado}" placeholder="algo.apps.googleusercontent.com">
+    </div>
+    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+      <button class="btn btn-ghost btn-sm" id="btn-guardar-client-id">Guardar Client ID</button>
+      <button class="btn btn-primary btn-sm" id="btn-respaldar-drive" ${clientIdGuardado ? '' : 'disabled'}>Respaldar ahora a Google Drive</button>
+      <span style="font-size:12px; color:var(--ink-faint);">Último respaldo a Drive: ${ultimoRespaldo}</span>
+    </div>
+  `;
+
+  document.getElementById('btn-guardar-client-id').addEventListener('click', async ()=>{
+    const clientId = document.getElementById('drive-client-id').value.trim();
+    if(!clientId){ mostrarToast('Pega el Client ID primero.'); return; }
+    const { error } = await sb.from('config_respaldo').upsert(
+      { empresa_id: ESTADO.empresaActual, google_client_id: clientId },
+      { onConflict: 'empresa_id' }
+    );
+    if(error){ mostrarToast('No se pudo guardar.'); console.error(error); return; }
+    mostrarToast('Client ID guardado.');
+    cargarConfigDrive();
+  });
+
+  document.getElementById('btn-respaldar-drive')?.addEventListener('click', ()=>{
+    const clientId = document.getElementById('drive-client-id').value.trim();
+    if(!clientId){ mostrarToast('Pega y guarda el Client ID primero.'); return; }
+    const btn = document.getElementById('btn-respaldar-drive');
+    pedirTokenDrive(clientId, async (token)=>{
+      btn.disabled = true; btn.textContent = 'Subiendo…';
+      try{
+        await subirRespaldoADrive(token);
+        await sb.from('config_respaldo').update({ ultimo_respaldo_en: new Date().toISOString() }).eq('empresa_id', ESTADO.empresaActual);
+        mostrarToast('Respaldo subido a Google Drive.');
+        cargarConfigDrive();
+      }catch(err){
+        mostrarToast('No se pudo subir a Drive.'); console.error(err);
+        btn.disabled = false; btn.textContent = 'Respaldar ahora a Google Drive';
+      }
+    });
+  });
 }
 
 /* ---------------------------------------------------------------------
