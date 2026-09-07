@@ -1159,6 +1159,7 @@ async function entrarAlPanel(){
   irA('dashboard');
   iniciarRealtime();
   cargarNotificaciones();
+  intentarRespaldoSilencioso();
 }
 
 /* =====================================================================
@@ -1719,11 +1720,31 @@ function pedirTokenDrive(clientId, callback){
   cliente.requestAccessToken();
 }
 
+/* Crea la carpeta de Drive la primera vez (si no hay una guardada) y
+   la reusa siempre después, para que los respaldos no queden sueltos
+   en la raíz de "Mi unidad". */
+async function obtenerOCrearCarpetaDrive(accessToken){
+  const { data } = await sb.from('config_respaldo').select('google_folder_id').eq('empresa_id', ESTADO.empresaActual).maybeSingle();
+  if(data?.google_folder_id) return data.google_folder_id;
+
+  const nombreCarpeta = `Respaldos — ${(ESTADO.empresa?.nombre || 'Empresa')}`;
+  const resp = await fetch('https://www.googleapis.com/drive/v3/files', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: nombreCarpeta, mimeType: 'application/vnd.google-apps.folder' }),
+  });
+  if(!resp.ok) throw new Error('No se pudo crear la carpeta en Drive: ' + resp.status);
+  const carpeta = await resp.json();
+  await sb.from('config_respaldo').update({ google_folder_id: carpeta.id }).eq('empresa_id', ESTADO.empresaActual);
+  return carpeta.id;
+}
+
 async function subirRespaldoADrive(accessToken){
+  const folderId = await obtenerOCrearCarpetaDrive(accessToken);
   const libro = await generarLibroRespaldo();
   const binario = XLSX.write(libro, { bookType: 'xlsx', type: 'array' });
   const blob = new Blob([binario], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-  const metadata = { name: nombreArchivoRespaldo(), mimeType: blob.type };
+  const metadata = { name: nombreArchivoRespaldo(), mimeType: blob.type, parents: [folderId] };
   const form = new FormData();
   form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
   form.append('file', blob);
@@ -1734,6 +1755,34 @@ async function subirRespaldoADrive(accessToken){
   });
   if(!resp.ok) throw new Error('Error subiendo a Drive: ' + resp.status);
   return resp.json();
+}
+
+/* Se llama sola al entrar al panel. Si ya pasó el número de días
+   configurado desde el último respaldo Y el navegador todavía tiene
+   la sesión de Google activa de una vez anterior, sube el respaldo
+   SIN pedirle nada a quien esté usando el panel. Si no puede hacerlo
+   en silencio (primera vez, sesión vencida, etc.), no molesta con
+   ningún aviso — se puede seguir haciendo manual desde Configuración. */
+function intentarRespaldoSilencioso(){
+  if(ESTADO.usuario.rol !== 'administrador') return;
+  (async ()=>{
+    const { data } = await sb.from('config_respaldo').select('*').eq('empresa_id', ESTADO.empresaActual).maybeSingle();
+    if(!data || !data.google_client_id) return;
+    const diasDesde = data.ultimo_respaldo_en ? (Date.now() - new Date(data.ultimo_respaldo_en).getTime()) / 86400000 : Infinity;
+    if(diasDesde < (data.dias_entre_respaldos || 7)) return;
+
+    const cliente = inicializarClienteDrive(data.google_client_id);
+    if(!cliente) return;
+    cliente.callback = async (resp)=>{
+      if(resp.error) return; // no se pudo sin interacción; queda pendiente para hacerlo manual
+      try{
+        await subirRespaldoADrive(resp.access_token);
+        await sb.from('config_respaldo').update({ ultimo_respaldo_en: new Date().toISOString() }).eq('empresa_id', ESTADO.empresaActual);
+        mostrarToast('Se hizo un respaldo automático a Google Drive.');
+      }catch(e){ console.error('Respaldo automático a Drive falló', e); }
+    };
+    try{ cliente.requestAccessToken({ prompt: 'none' }); }catch(e){ /* intento silencioso, no hay nada que mostrar si falla */ }
+  })();
 }
 
 async function cargarConfigDrive(){
@@ -2162,7 +2211,7 @@ async function pintarEditorPermisos(usuarioId, rol){
   const { data } = await sb.from('permisos_usuario').select('*').eq('usuario_id', usuarioId);
   const actuales = {};
   (data||[]).forEach(p=>actuales[p.modulo_id]=p);
-  const modulosEditable = MODULOS.filter(m=>!m.siempreVisible && !m.soloAdmin);
+  const modulosEditable = MODULOS.filter(m=>!m.siempreVisible && !m.soloAdmin && m.id !== 'caja_chica');
   box.innerHTML = `
     <div class="panel">
       <h3>Permisos por módulo</h3>
@@ -5692,8 +5741,8 @@ async function cargarCajaChica(usuarioId, usuarioObj){
             <td class="num">${fmtMoney(g.monto)}</td>
             <td style="white-space:nowrap;">
               ${g.comprobante_path ? `<button class="btn btn-ghost btn-sm" data-ver-comprobante-gasto="${g.comprobante_path}">Ver comprobante</button>` : ''}
-              ${esPropiaOGestion ? `<button class="btn btn-ghost btn-sm" data-editar-gasto='${JSON.stringify({id:g.id, fecha:g.fecha, monto:g.monto, concepto:g.concepto, proveedor_id:g.proveedor_id||'', comprobante_path:g.comprobante_path||''})}'>Editar</button>` : ''}
-              ${esPropiaOGestion ? `<button class="btn btn-ghost btn-sm" data-eliminar-gasto="${g.id}">Eliminar</button>` : ''}
+              ${esPropiaOGestion ? `<button class="btn btn-ghost btn-sm" data-editar-gasto='${JSON.stringify({id:g.id, fecha:g.fecha, monto:g.monto, concepto:g.concepto, proveedor_id:g.proveedor_id||'', comprobante_path:g.comprobante_path||'', recibo_id:g.recibo_id||''})}'>Editar</button>` : ''}
+              ${esPropiaOGestion ? `<button class="btn btn-ghost btn-sm" data-eliminar-gasto="${g.id}" data-recibo-id="${g.recibo_id || ''}">Eliminar</button>` : ''}
             </td>
           </tr>`).join('') : '<tr><td colspan="5"><div class="vacio">Sin gastos registrados este mes.</div></td></tr>'}
         </tbody>
@@ -5745,6 +5794,7 @@ async function cargarCajaChica(usuarioId, usuarioObj){
       if(!confirm('¿Eliminar este gasto de caja chica? No se puede deshacer.')) return;
       const { error } = await sb.from('caja_chica_gastos').delete().eq('id', b.dataset.eliminarGasto);
       if(error){ mostrarToast('No se pudo eliminar.'); return; }
+      if(b.dataset.reciboId) await sb.from('recibos').delete().eq('id', b.dataset.reciboId);
       mostrarToast('Gasto eliminado.');
       recargar();
     });
@@ -5763,17 +5813,29 @@ async function cargarCajaChica(usuarioId, usuarioObj){
    acceso al listado general de Recibos. */
 async function abrirFormGastoCajaChica(usuarioId, gasto, alGuardar){
   const editando = !!gasto;
-  const { data: proveedores } = await sb.from('proveedores').select('id, nombre').eq('empresa_id', ESTADO.empresaActual).eq('activo', true).order('nombre');
+  const [{ data: proveedores }, { data: gastosRecPendientes }] = await Promise.all([
+    sb.from('proveedores').select('id, nombre').eq('empresa_id', ESTADO.empresaActual).eq('activo', true).order('nombre'),
+    sb.from('gastos_recurrentes').select('id, nombre, monto_estimado, categoria_id, proveedor_id, proximo_vencimiento, frecuencia').eq('empresa_id', ESTADO.empresaActual).eq('activo', true).order('proximo_vencimiento'),
+  ]);
   abrirModal(`
     <h3>${editando ? 'Editar gasto' : 'Registrar gasto de caja chica'}</h3>
     <form id="form-gasto-caja-chica">
       <div class="grid-form" style="grid-template-columns:1fr 1fr;">
+        ${!editando ? `
+          <div class="campo-inline" style="grid-column:1/-1;">
+            <label>¿Es para pagar un gasto recurrente pendiente? (opcional)</label>
+            <select id="select-gasto-recurrente-pendiente">
+              <option value="">No, es un gasto nuevo</option>
+              ${(gastosRecPendientes||[]).map(g => `<option value="${g.id}">${g.nombre} — ${fmtMoney(g.monto_estimado)} (vence ${fmtFecha(g.proximo_vencimiento)})</option>`).join('')}
+            </select>
+          </div>
+        ` : ''}
         <div class="campo-inline"><label>Fecha</label><input name="fecha" type="date" value="${editando ? gasto.fecha : new Date().toISOString().slice(0,10)}" required></div>
-        <div class="campo-inline"><label>Monto</label><input name="monto" type="number" step="0.01" min="0.01" value="${editando ? gasto.monto : ''}" required></div>
-        <div class="campo-inline" style="grid-column:1/-1;"><label>¿En qué se gastó?</label><input name="concepto" placeholder="Ej. Hielo para el mostrador" value="${editando ? gasto.concepto : ''}" required></div>
+        <div class="campo-inline"><label>Monto</label><input name="monto" id="input-monto-gasto-cc" type="number" step="0.01" min="0.01" value="${editando ? gasto.monto : ''}" required></div>
+        <div class="campo-inline" style="grid-column:1/-1;"><label>¿En qué se gastó?</label><input name="concepto" id="input-concepto-gasto-cc" placeholder="Ej. Hielo para el mostrador" value="${editando ? gasto.concepto : ''}" required></div>
         <div class="campo-inline" style="grid-column:1/-1;">
           <label>Proveedor (opcional)</label>
-          <select name="proveedor_id">
+          <select name="proveedor_id" id="select-proveedor-gasto-cc">
             <option value="">Sin proveedor</option>
             ${(proveedores||[]).map(p => `<option value="${p.id}" ${editando && gasto.proveedor_id===p.id ? 'selected':''}>${p.nombre}</option>`).join('')}
           </select>
@@ -5789,6 +5851,7 @@ async function abrirFormGastoCajaChica(usuarioId, gasto, alGuardar){
           </div>
         </div>
       ` : ''}
+      <div style="font-size:12px; color:var(--ink-faint); margin-bottom:14px;">Este gasto también se registra como Recibo, así que ya cuenta solo en Reportes y en los resúmenes financieros.</div>
       <div class="modal-acciones">
         <button type="button" class="btn btn-ghost" id="btn-cancelar-gasto-caja-chica">Cancelar</button>
         <button type="submit" class="btn btn-primary">Guardar</button>
@@ -5796,6 +5859,13 @@ async function abrirFormGastoCajaChica(usuarioId, gasto, alGuardar){
     </form>
   `);
   document.getElementById('btn-cancelar-gasto-caja-chica').addEventListener('click', cerrarModal);
+  document.getElementById('select-gasto-recurrente-pendiente')?.addEventListener('change', (ev)=>{
+    const g = (gastosRecPendientes||[]).find(x => x.id === ev.target.value);
+    if(!g) return;
+    document.getElementById('input-monto-gasto-cc').value = g.monto_estimado;
+    document.getElementById('input-concepto-gasto-cc').value = g.nombre;
+    if(g.proveedor_id) document.getElementById('select-proveedor-gasto-cc').value = g.proveedor_id;
+  });
   document.getElementById('btn-ver-comprobante-gasto-form')?.addEventListener('click', async ()=>{
     const { data, error } = await sb.storage.from('comprobantes').createSignedUrl(gasto.comprobante_path, 3600);
     if(error){ mostrarToast('No se pudo abrir.'); return; }
@@ -5814,6 +5884,8 @@ async function abrirFormGastoCajaChica(usuarioId, gasto, alGuardar){
     ev.preventDefault();
     const fd = new FormData(ev.target);
     const archivo = ev.target.querySelector('[name=comprobante_archivo]').files[0];
+    const gastoRecurrenteId = document.getElementById('select-gasto-recurrente-pendiente')?.value || null;
+    const gastoRecurrente = gastoRecurrenteId ? (gastosRecPendientes||[]).find(g => g.id === gastoRecurrenteId) : null;
     const desbloquear = bloquearEnvio(ev.target, archivo ? 'Subiendo comprobante…' : 'Guardando…');
     const payload = {
       fecha: fd.get('fecha'),
@@ -5828,10 +5900,29 @@ async function abrirFormGastoCajaChica(usuarioId, gasto, alGuardar){
     let error;
     if(editando){
       ({ error } = await sb.from('caja_chica_gastos').update(payload).eq('id', gasto.id));
+      if(!error && gasto.recibo_id){
+        await sb.from('recibos').update({ monto: payload.monto, fecha: payload.fecha, descripcion: payload.concepto }).eq('id', gasto.recibo_id);
+      }
     } else {
+      // Cada gasto de caja chica también crea su propio Recibo, para
+      // que cuente solo en Reportes sin duplicar lógica ahí.
+      const { data: recibo, error: errorRecibo } = await sb.from('recibos').insert({
+        tipo: 'egreso', monto: payload.monto, fecha: payload.fecha,
+        categoria_id: gastoRecurrente?.categoria_id || null,
+        descripcion: `Caja chica: ${payload.concepto}`,
+        creado_por: usuarioId, empresa_id: ESTADO.empresaActual,
+      }).select().single();
+      if(errorRecibo){ desbloquear(); mostrarToast('No se pudo guardar.'); console.error(errorRecibo); return; }
+
       payload.usuario_id = usuarioId;
       payload.empresa_id = ESTADO.empresaActual;
+      payload.recibo_id = recibo.id;
+      payload.gasto_recurrente_id = gastoRecurrenteId;
       ({ error } = await sb.from('caja_chica_gastos').insert(payload));
+
+      if(!error && gastoRecurrente){
+        await sb.from('gastos_recurrentes').update({ proximo_vencimiento: siguienteFecha(gastoRecurrente.proximo_vencimiento, gastoRecurrente.frecuencia || 'mensual') }).eq('id', gastoRecurrenteId);
+      }
     }
     if(error){ desbloquear(); mostrarToast('No se pudo guardar.'); console.error(error); return; }
     registrarAuditoria('caja_chica_gastos', editando ? gasto.id : null, editando ? 'editar' : 'crear', `${payload.concepto} — ${fmtMoney(payload.monto)}`);
