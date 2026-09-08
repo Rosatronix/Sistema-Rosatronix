@@ -3027,7 +3027,10 @@ async function abrirHistorialPagos(r){
             <td>${p.cuentas ? p.cuentas.nombre : '—'}</td>
             <td>${p.metodos_pago ? p.metodos_pago.nombre : '—'}</td>
             <td class="num">${fmtMoney(p.monto)}</td>
-            <td><button type="button" class="btn btn-ghost btn-sm" data-imprimir-pago="${p.id}">Imprimir</button></td>
+            <td style="white-space:nowrap;">
+              <button type="button" class="btn btn-ghost btn-sm" data-imprimir-pago="${p.id}">Imprimir</button>
+              <button type="button" class="btn btn-ghost btn-sm" data-eliminar-pago="${p.id}">Eliminar</button>
+            </td>
           </tr>`).join('')}
         </tbody>
       </table>
@@ -3049,6 +3052,21 @@ async function abrirHistorialPagos(r){
         ['Monto', fmtMoney(p.monto)],
         ['Referencia', p.referencia || '—'],
       ]);
+    });
+  });
+  document.querySelectorAll('[data-eliminar-pago]').forEach(b=>{
+    b.addEventListener('click', ()=>{
+      const p = filas.find(x => x.id === b.dataset.eliminarPago);
+      confirmarEscribiendoNombre(String(p.monto), 'Eliminar pago',
+        `¿Eliminar este pago de <strong>${fmtMoney(p.monto)}</strong> del ${fmtFecha(p.fecha_pago)}? Se le devuelve el dinero a la cuenta y el saldo pendiente a la factura. No se puede deshacer.`,
+        async ()=>{
+          const { error } = await sb.rpc('fn_eliminar_pago', { p_pago_id: p.id });
+          cerrarModal();
+          if(error){ mostrarToast('No se pudo eliminar.'); console.error(error); return; }
+          registrarAuditoria('pagos_realizados', p.id, 'eliminar', `${fmtMoney(p.monto)} — ${r.proveedores ? r.proveedores.nombre : ''}`);
+          mostrarToast('Pago eliminado.');
+          cargarTablaCxp();
+        });
     });
   });
 }
@@ -3319,7 +3337,10 @@ async function abrirHistorialCobros(r){
             <td>${c.cuentas ? c.cuentas.nombre : '—'}</td>
             <td>${c.metodos_pago ? c.metodos_pago.nombre : '—'}</td>
             <td class="num">${fmtMoney(c.monto)}</td>
-            <td><button type="button" class="btn btn-ghost btn-sm" data-imprimir-cobro="${c.id}">Imprimir</button></td>
+            <td style="white-space:nowrap;">
+              <button type="button" class="btn btn-ghost btn-sm" data-imprimir-cobro="${c.id}">Imprimir</button>
+              <button type="button" class="btn btn-ghost btn-sm" data-eliminar-cobro="${c.id}">Eliminar</button>
+            </td>
           </tr>`).join('')}
         </tbody>
       </table>
@@ -3341,6 +3362,21 @@ async function abrirHistorialCobros(r){
         ['Monto', fmtMoney(c.monto)],
         ['Referencia', c.referencia || '—'],
       ]);
+    });
+  });
+  document.querySelectorAll('[data-eliminar-cobro]').forEach(b=>{
+    b.addEventListener('click', ()=>{
+      const c = filas.find(x => x.id === b.dataset.eliminarCobro);
+      confirmarEscribiendoNombre(String(c.monto), 'Eliminar cobro',
+        `¿Eliminar este cobro de <strong>${fmtMoney(c.monto)}</strong> del ${fmtFecha(c.fecha_cobro)}? Se le quita el dinero a la cuenta y se le devuelve el saldo pendiente a la factura. No se puede deshacer.`,
+        async ()=>{
+          const { error } = await sb.rpc('fn_eliminar_cobro', { p_cobro_id: c.id });
+          cerrarModal();
+          if(error){ mostrarToast('No se pudo eliminar.'); console.error(error); return; }
+          registrarAuditoria('cobros_recibidos', c.id, 'eliminar', `${fmtMoney(c.monto)} — ${r.clientes_credito ? r.clientes_credito.nombre : ''}`);
+          mostrarToast('Cobro eliminado.');
+          cargarTablaCxc();
+        });
     });
   });
 }
