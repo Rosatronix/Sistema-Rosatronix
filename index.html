@@ -2635,8 +2635,11 @@ function abrirFormDeposito(origen, todasLasCuentas){
    el sistema y lo que el banco realmente registró. */
 let conciliacionAnio = new Date().getFullYear();
 let conciliacionMes = new Date().getMonth();
+let cuentaConciliandoActual = null;
 
 async function abrirConciliacion(cuenta){
+  cuentaConciliandoActual = cuenta;
+  ESTADO.vistaActual = 'conciliacion';
   const cont = document.getElementById('main');
   const encabezadoHtml = encabezado(`Conciliar — ${cuenta.nombre}`, 'Marca cada movimiento cuando ya aparezca en tu estado de cuenta del banco');
   cont.innerHTML = encabezadoHtml + `
@@ -2650,6 +2653,11 @@ async function abrirConciliacion(cuenta){
   conciliacionMes = new Date().getMonth();
   await cargarConciliacion(cuenta);
 }
+// Registrada aparte de VISTAS[modulo] normal: cuando algo se actualiza en
+// vivo (incluido marcar/desmarcar una casilla aquí mismo), esto vuelve a
+// pintar solo la tabla de movimientos, sin reconstruir toda la pantalla
+// ni reiniciar el mes que estabas viendo — así no te saca de aquí.
+VISTAS.conciliacion = () => cuentaConciliandoActual && cargarConciliacion(cuentaConciliandoActual);
 
 async function cargarConciliacion(cuenta){
   const cont = document.getElementById('conciliacion-contenido');
