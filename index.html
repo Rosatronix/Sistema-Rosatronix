@@ -1983,6 +1983,7 @@ async function pintarListaUsuarios(){
           ${u.rol === 'operativo' ? `<button class="btn btn-ghost btn-sm" data-accion="empresas" data-id="${u.id}" data-nombre="${u.nombre}">Empresas</button>` : ''}
           ${u.rol === 'operativo' ? `<button class="btn btn-ghost btn-sm" data-accion="cajachica" data-id="${u.id}" data-nombre="${u.nombre}">Caja Chica</button>` : ''}
           ${u.rol === 'operativo' ? `<button class="btn btn-ghost btn-sm" data-accion="contador" data-id="${u.id}" data-nombre="${u.nombre}" data-actual="${u.acceso_contador}">${u.acceso_contador ? 'Quitar acceso de contador' : 'Dar acceso de contador'}</button>` : ''}
+          <button class="btn btn-ghost btn-sm" data-accion="editar-nombre" data-id="${u.id}" data-nombre="${u.nombre}" data-rol="${u.rol}">Editar nombre</button>
           <button class="btn btn-ghost btn-sm" data-accion="reset" data-id="${u.id}" data-nombre="${u.nombre}">Restablecer contraseña</button>
           ${u.id !== ESTADO.usuario.id ? `<button class="btn btn-ghost btn-sm" data-accion="eliminar" data-id="${u.id}" data-nombre="${u.nombre}">Eliminar</button>` : ''}
         </td>
@@ -2003,6 +2004,33 @@ async function pintarListaUsuarios(){
       registrarAuditoria('usuarios', b.dataset.id, activo ? 'desactivar' : 'activar', b.dataset.nombre);
       mostrarToast(activo ? 'Usuario desactivado.' : 'Usuario activado.');
       pintarListaUsuarios();
+    });
+  });
+  cont.querySelectorAll('[data-accion=editar-nombre]').forEach(b=>{
+    b.addEventListener('click', ()=>{
+      abrirModal(`
+        <h3>Editar nombre</h3>
+        <form id="form-editar-nombre-usuario">
+          <div class="campo-inline" style="margin-bottom:14px;"><label>Nombre completo</label><input name="nombre" value="${b.dataset.nombre}" required></div>
+          <div class="modal-acciones">
+            <button type="button" class="btn btn-ghost" id="btn-cancelar-editar-nombre">Cancelar</button>
+            <button type="submit" class="btn btn-primary">Guardar</button>
+          </div>
+        </form>
+      `);
+      document.getElementById('btn-cancelar-editar-nombre').addEventListener('click', cerrarModal);
+      document.getElementById('form-editar-nombre-usuario').addEventListener('submit', async (ev)=>{
+        ev.preventDefault();
+        const nuevoNombre = new FormData(ev.target).get('nombre');
+        const { error } = await sb.rpc('fn_actualizar_usuario', {
+          p_usuario_id: b.dataset.id, p_nombre: nuevoNombre, p_rol: b.dataset.rol, p_activo: null,
+        });
+        if(error){ mostrarToast('No se pudo guardar.'); console.error(error); return; }
+        registrarAuditoria('usuarios', b.dataset.id, 'editar', `Nombre cambiado a ${nuevoNombre}`);
+        cerrarModal();
+        mostrarToast('Nombre actualizado.');
+        pintarListaUsuarios();
+      });
     });
   });
   cont.querySelectorAll('[data-accion=permisos]').forEach(b=>{
@@ -2686,7 +2714,7 @@ async function cargarConciliacion(cuenta){
       Movimientos conciliados este mes: <strong class="mono">${fmtMoney(totalConciliado)}</strong> · Sin conciliar: <strong>${totalSinConciliar}</strong>
     </div>
     <table class="tabla">
-      <thead><tr><th style="width:40px;"></th><th>Fecha</th><th>Tipo</th><th>Origen</th><th>Nota</th><th class="num">Monto</th></tr></thead>
+      <thead><tr><th style="width:40px;"></th><th>Fecha</th><th>Tipo</th><th>Origen</th><th>Nota</th><th class="num">Monto</th><th></th></tr></thead>
       <tbody>
         ${data.length ? data.map(m => `<tr style="${m.conciliado ? 'opacity:.55;' : ''}">
           <td><input type="checkbox" class="check-conciliar" data-id="${m.id}" ${m.conciliado ? 'checked' : ''}></td>
@@ -2695,7 +2723,8 @@ async function cargarConciliacion(cuenta){
           <td>${m.referencia_tipo}</td>
           <td>${m.nota || '—'}</td>
           <td class="num">${fmtMoney(m.monto)}</td>
-        </tr>`).join('') : '<tr><td colspan="6"><div class="vacio">Sin movimientos este mes.</div></td></tr>'}
+          <td>${m.referencia_tipo === 'deposito' ? `<button class="btn btn-ghost btn-sm" data-deshacer-deposito="${m.referencia_id}">Deshacer</button>` : ''}</td>
+        </tr>`).join('') : '<tr><td colspan="7"><div class="vacio">Sin movimientos este mes.</div></td></tr>'}
       </tbody>
     </table>
   `;
@@ -2706,6 +2735,16 @@ async function cargarConciliacion(cuenta){
   document.getElementById('conc-mes-siguiente').addEventListener('click', ()=>{
     conciliacionMes++; if(conciliacionMes > 11){ conciliacionMes = 0; conciliacionAnio++; }
     cargarConciliacion(cuenta);
+  });
+  cont.querySelectorAll('[data-deshacer-deposito]').forEach(b=>{
+    b.addEventListener('click', async ()=>{
+      if(!confirm('¿Deshacer este depósito? Se le devuelve el dinero a la cuenta de origen y se le quita a la de destino. No se puede deshacer esta acción.')) return;
+      const { error } = await sb.rpc('fn_eliminar_deposito', { p_deposito_id: b.dataset.deshacerDeposito });
+      if(error){ mostrarToast('No se pudo deshacer.'); console.error(error); return; }
+      registrarAuditoria('depositos_caja', b.dataset.deshacerDeposito, 'eliminar', 'Depósito revertido');
+      mostrarToast('Depósito deshecho.');
+      cargarConciliacion(cuenta);
+    });
   });
   cont.querySelectorAll('.check-conciliar').forEach(chk=>{
     chk.addEventListener('change', async ()=>{
@@ -3719,17 +3758,52 @@ function confirmarEliminarRecibo(r){
   });
 }
 
-function abrirFormEditarRecibo(r){
+async function abrirFormEditarRecibo(r){
+  const [{ data: categorias }, { data: cuentas }, { data: metodos }] = await Promise.all([
+    sb.from('categorias_gasto').select('id, nombre').eq('empresa_id', ESTADO.empresaActual).eq('activo', true).order('nombre'),
+    sb.from('cuentas').select('id, nombre').eq('empresa_id', ESTADO.empresaActual).eq('activo', true).order('nombre'),
+    sb.from('metodos_pago').select('id, nombre').eq('empresa_id', ESTADO.empresaActual).eq('activo', true).order('nombre'),
+  ]);
   abrirModal(`
     <h3>Editar recibo</h3>
-    <div style="font-size:12.5px; color:var(--ink-soft); margin-bottom:14px;">
-      El tipo, monto, fecha y cuenta no se pueden cambiar una vez creado (para no descuadrar el saldo). Solo se puede ajustar la descripción y el comprobante.
-    </div>
     <form id="form-editar-recibo">
-      <div class="campo-inline" style="margin-bottom:12px;"><label>Descripción</label><input name="descripcion" value="${r.descripcion || ''}"></div>
-      <div class="campo-inline"><label>Enlace al comprobante</label><input name="adjunto_url" type="url" value="${r.adjunto_url || ''}" placeholder="https://…"></div>
+      <div class="grid-form" style="grid-template-columns:1fr 1fr;">
+        <div class="campo-inline">
+          <label>Tipo</label>
+          <select name="tipo">
+            <option value="ingreso" ${r.tipo==='ingreso'?'selected':''}>Ingreso</option>
+            <option value="egreso" ${r.tipo==='egreso'?'selected':''}>Egreso</option>
+          </select>
+        </div>
+        <div class="campo-inline"><label>Monto</label><input name="monto" type="number" step="0.01" min="0.01" value="${r.monto}" required></div>
+        <div class="campo-inline"><label>Fecha</label><input name="fecha" type="date" value="${r.fecha}" required></div>
+        <div class="campo-inline">
+          <label>Categoría</label>
+          <select name="categoria_id">
+            <option value="">Sin categoría</option>
+            ${(categorias||[]).map(c => `<option value="${c.id}" ${r.categoria_id===c.id?'selected':''}>${c.nombre}</option>`).join('')}
+          </select>
+        </div>
+        <div class="campo-inline">
+          <label>Cuenta</label>
+          <select name="cuenta_id">
+            <option value="">Sin cuenta (solo registro)</option>
+            ${(cuentas||[]).map(c => `<option value="${c.id}" ${r.cuenta_id===c.id?'selected':''}>${c.nombre}</option>`).join('')}
+          </select>
+        </div>
+        <div class="campo-inline">
+          <label>Método de pago</label>
+          <select name="metodo_pago_id">
+            <option value="">Sin especificar</option>
+            ${(metodos||[]).map(m => `<option value="${m.id}" ${r.metodo_pago_id===m.id?'selected':''}>${m.nombre}</option>`).join('')}
+          </select>
+        </div>
+        <div class="campo-inline" style="grid-column:1/-1;"><label>Descripción</label><input name="descripcion" value="${r.descripcion || ''}"></div>
+        <div class="campo-inline" style="grid-column:1/-1;"><label>Enlace al comprobante</label><input name="adjunto_url" type="url" value="${r.adjunto_url || ''}" placeholder="https://…"></div>
+      </div>
+      <div style="font-size:12px; color:var(--ink-faint); margin-bottom:14px;">Si cambias el monto, la fecha, el tipo o la cuenta, el saldo se ajusta solo — se revierte el efecto anterior y se aplica el nuevo.</div>
       ${r.adjunto_path ? `
-        <div class="campo-inline" style="margin-top:12px;">
+        <div class="campo-inline" style="margin-bottom:14px;">
           <label>Comprobante subido</label>
           <div style="display:flex; gap:8px;">
             <button type="button" class="btn btn-ghost btn-sm" id="btn-ver-comprobante-recibo">Ver comprobante</button>
@@ -3762,12 +3836,20 @@ function abrirFormEditarRecibo(r){
   document.getElementById('form-editar-recibo').addEventListener('submit', async (ev)=>{
     ev.preventDefault();
     const fd = new FormData(ev.target);
-    const payload = {
-      descripcion: fd.get('descripcion') || null,
-      adjunto_url: fd.get('adjunto_url') || null,
-    };
-    const { error } = await sb.from('recibos').update(payload).eq('id', r.id);
+    const { error } = await sb.rpc('fn_editar_recibo', {
+      p_recibo_id: r.id,
+      p_tipo: fd.get('tipo'),
+      p_monto: Number(fd.get('monto')),
+      p_fecha: fd.get('fecha'),
+      p_categoria_id: fd.get('categoria_id') || null,
+      p_cuenta_id: fd.get('cuenta_id') || null,
+      p_metodo_pago_id: fd.get('metodo_pago_id') || null,
+      p_descripcion: fd.get('descripcion') || null,
+    });
     if(error){ mostrarToast('No se pudo guardar.'); console.error(error); return; }
+    const adjuntoUrl = fd.get('adjunto_url') || null;
+    if(adjuntoUrl !== r.adjunto_url) await sb.from('recibos').update({ adjunto_url: adjuntoUrl }).eq('id', r.id);
+    registrarAuditoria('recibos', r.id, 'editar', `${fd.get('tipo')} — ${fmtMoney(fd.get('monto'))}`);
     cerrarModal();
     mostrarToast('Recibo actualizado.');
     cargarTablaRecibos();
@@ -5499,6 +5581,7 @@ async function cargarCalendario(){
                 ${ev.descripcion ? `<br><span style="font-size:12px; color:var(--ink-faint); font-weight:600;">${ev.descripcion}</span>` : ''}
               </span>
             </label>
+            <button type="button" class="btn btn-ghost btn-sm" data-editar-sugerencia="${ev.id}" data-titulo="${ev.titulo}" data-descripcion="${ev.descripcion || ''}" data-fecha="${celda.dataset.fecha}" title="Editar">✎</button>
             <button type="button" class="btn btn-ghost btn-sm" data-eliminar-sugerencia="${ev.id}" title="Eliminar">✕</button>
           </div>
         ` : `<div class="calendario-detalle-evento">${ev.titulo}</div>`).join('')}
@@ -5511,6 +5594,9 @@ async function cargarCalendario(){
           if(error){ mostrarToast('No se pudo actualizar.'); return; }
           cargarCalendario();
         });
+      });
+      document.querySelectorAll('[data-editar-sugerencia]').forEach(b => {
+        b.addEventListener('click', ()=> abrirFormSugerencia({ id: b.dataset.editarSugerencia, titulo: b.dataset.titulo, descripcion: b.dataset.descripcion, fecha: b.dataset.fecha }));
       });
       document.querySelectorAll('[data-eliminar-sugerencia]').forEach(b => {
         b.addEventListener('click', async ()=>{
@@ -5526,17 +5612,18 @@ async function cargarCalendario(){
   });
 }
 
-function abrirFormSugerencia(){
+function abrirFormSugerencia(sugerencia){
+  const editando = !!sugerencia;
   abrirModal(`
-    <h3>Sugerir algo</h3>
+    <h3>${editando ? 'Editar sugerencia' : 'Sugerir algo'}</h3>
     <div style="font-size:12.5px; color:var(--ink-soft); margin-bottom:14px;">Se mostrará a todos los que usen este Calendario, en la fecha que elijas. Ej. "Comprar filtros de agua".</div>
     <form id="form-sugerencia">
-      <div class="campo-inline" style="margin-bottom:12px;"><label>¿Qué hay que hacer?</label><input name="titulo" placeholder="Ej. Comprar filtros de agua" required></div>
-      <div class="campo-inline" style="margin-bottom:12px;"><label>Detalle (opcional)</label><input name="descripcion" placeholder="Algo más de contexto…"></div>
-      <div class="campo-inline"><label>Fecha</label><input name="fecha" type="date" value="${new Date().toISOString().slice(0,10)}" required></div>
+      <div class="campo-inline" style="margin-bottom:12px;"><label>¿Qué hay que hacer?</label><input name="titulo" placeholder="Ej. Comprar filtros de agua" value="${editando ? sugerencia.titulo : ''}" required></div>
+      <div class="campo-inline" style="margin-bottom:12px;"><label>Detalle (opcional)</label><input name="descripcion" placeholder="Algo más de contexto…" value="${editando ? sugerencia.descripcion : ''}"></div>
+      <div class="campo-inline"><label>Fecha</label><input name="fecha" type="date" value="${editando ? sugerencia.fecha : new Date().toISOString().slice(0,10)}" required></div>
       <div class="modal-acciones">
         <button type="button" class="btn btn-ghost" id="btn-cancelar-sugerencia">Cancelar</button>
-        <button type="submit" class="btn btn-primary">Publicar</button>
+        <button type="submit" class="btn btn-primary">${editando ? 'Guardar cambios' : 'Publicar'}</button>
       </div>
     </form>
   `);
@@ -5544,16 +5631,22 @@ function abrirFormSugerencia(){
   document.getElementById('form-sugerencia').addEventListener('submit', async (ev)=>{
     ev.preventDefault();
     const fd = new FormData(ev.target);
-    const { error } = await sb.from('sugerencias').insert({
+    const payload = {
       titulo: fd.get('titulo'),
       descripcion: fd.get('descripcion') || null,
       fecha: fd.get('fecha'),
-      creado_por: ESTADO.usuario.id,
-      empresa_id: ESTADO.empresaActual,
-    });
-    if(error){ mostrarToast('No se pudo publicar.'); console.error(error); return; }
+    };
+    let error;
+    if(editando){
+      ({ error } = await sb.from('sugerencias').update(payload).eq('id', sugerencia.id));
+    } else {
+      payload.creado_por = ESTADO.usuario.id;
+      payload.empresa_id = ESTADO.empresaActual;
+      ({ error } = await sb.from('sugerencias').insert(payload));
+    }
+    if(error){ mostrarToast(editando ? 'No se pudo guardar.' : 'No se pudo publicar.'); console.error(error); return; }
     cerrarModal();
-    mostrarToast('Sugerencia publicada.');
+    mostrarToast(editando ? 'Sugerencia actualizada.' : 'Sugerencia publicada.');
     cargarCalendario();
   });
 }
@@ -5810,10 +5903,10 @@ async function cargarCajaChica(usuarioId, usuarioObj){
   });
 
   document.getElementById('btn-asignar-hoy')?.addEventListener('click', ()=>
-    abrirFormAsignacionDiaria(usuarioId, hoyStr, montoAsignadoHoy !== null ? montoAsignadoHoy : usuarioObj.caja_chica_monto_diario, recargar));
+    abrirFormAsignacionDiaria(usuarioId, hoyStr, montoAsignadoHoy !== null ? montoAsignadoHoy : usuarioObj.caja_chica_monto_diario, recargar, montoAsignadoHoy !== null));
   cont.querySelectorAll('[data-asignar-fecha]').forEach(b=>{
     b.addEventListener('click', ()=>
-      abrirFormAsignacionDiaria(usuarioId, b.dataset.asignarFecha, b.dataset.monto || usuarioObj.caja_chica_monto_diario, recargar));
+      abrirFormAsignacionDiaria(usuarioId, b.dataset.asignarFecha, b.dataset.monto || usuarioObj.caja_chica_monto_diario, recargar, !!b.dataset.monto));
   });
   cont.querySelectorAll('[data-cuadre-fecha]').forEach(b=>{
     b.addEventListener('click', async ()=>{
@@ -5875,7 +5968,7 @@ async function abrirFormGastoCajaChica(usuarioId, gasto, alGuardar){
           </div>
         ` : ''}
         <div class="campo-inline"><label>Fecha</label><input name="fecha" type="date" value="${editando ? gasto.fecha : new Date().toISOString().slice(0,10)}" required></div>
-        <div class="campo-inline"><label>Monto</label><input name="monto" id="input-monto-gasto-cc" type="number" step="0.01" min="0.01" value="${editando ? gasto.monto : ''}" required></div>
+        <div class="campo-inline"><label>Monto</label><input name="monto" id="input-monto-gasto-cc" type="number" step="0.01" min="0" value="${editando ? gasto.monto : ''}" required></div>
         <div class="campo-inline" style="grid-column:1/-1;"><label>¿En qué se gastó?</label><input name="concepto" id="input-concepto-gasto-cc" placeholder="Ej. Hielo para el mostrador" value="${editando ? gasto.concepto : ''}" required></div>
         <div class="campo-inline" style="grid-column:1/-1;">
           <label>Proveedor (opcional)</label>
@@ -5927,13 +6020,15 @@ async function abrirFormGastoCajaChica(usuarioId, gasto, alGuardar){
   document.getElementById('form-gasto-caja-chica').addEventListener('submit', async (ev)=>{
     ev.preventDefault();
     const fd = new FormData(ev.target);
+    const montoIngresado = Number(fd.get('monto'));
+    if(montoIngresado === 0 && !confirm('¿Confirmas que este gasto es de Q0.00? (por ejemplo, saliste a comprar pero no gastaste nada)')) return;
     const archivo = ev.target.querySelector('[name=comprobante_archivo]').files[0];
     const gastoRecurrenteId = document.getElementById('select-gasto-recurrente-pendiente')?.value || null;
     const gastoRecurrente = gastoRecurrenteId ? (gastosRecPendientes||[]).find(g => g.id === gastoRecurrenteId) : null;
     const desbloquear = bloquearEnvio(ev.target, archivo ? 'Subiendo comprobante…' : 'Guardando…');
     const payload = {
       fecha: fd.get('fecha'),
-      monto: Number(fd.get('monto')),
+      monto: montoIngresado,
       concepto: fd.get('concepto'),
       proveedor_id: fd.get('proveedor_id') || null,
     };
@@ -5945,22 +6040,33 @@ async function abrirFormGastoCajaChica(usuarioId, gasto, alGuardar){
     if(editando){
       ({ error } = await sb.from('caja_chica_gastos').update(payload).eq('id', gasto.id));
       if(!error && gasto.recibo_id){
-        await sb.from('recibos').update({ monto: payload.monto, fecha: payload.fecha, descripcion: payload.concepto }).eq('id', gasto.recibo_id);
+        if(payload.monto > 0){
+          await sb.from('recibos').update({ monto: payload.monto, fecha: payload.fecha, descripcion: payload.concepto }).eq('id', gasto.recibo_id);
+        } else {
+          await sb.from('recibos').delete().eq('id', gasto.recibo_id);
+          await sb.from('caja_chica_gastos').update({ recibo_id: null }).eq('id', gasto.id);
+        }
       }
     } else {
-      // Cada gasto de caja chica también crea su propio Recibo, para
-      // que cuente solo en Reportes sin duplicar lógica ahí.
-      const { data: recibo, error: errorRecibo } = await sb.from('recibos').insert({
-        tipo: 'egreso', monto: payload.monto, fecha: payload.fecha,
-        categoria_id: gastoRecurrente?.categoria_id || null,
-        descripcion: `Caja chica: ${payload.concepto}`,
-        creado_por: usuarioId, empresa_id: ESTADO.empresaActual,
-      }).select().single();
-      if(errorRecibo){ desbloquear(); mostrarToast('No se pudo guardar.'); console.error(errorRecibo); return; }
+      // Cada gasto de caja chica con monto mayor a 0 también crea su
+      // propio Recibo, para que cuente solo en Reportes sin duplicar
+      // lógica ahí. Un gasto de Q0.00 no genera Recibo (no hay nada
+      // que sumar).
+      let reciboId = null;
+      if(payload.monto > 0){
+        const { data: recibo, error: errorRecibo } = await sb.from('recibos').insert({
+          tipo: 'egreso', monto: payload.monto, fecha: payload.fecha,
+          categoria_id: gastoRecurrente?.categoria_id || null,
+          descripcion: `Caja chica: ${payload.concepto}`,
+          creado_por: usuarioId, empresa_id: ESTADO.empresaActual,
+        }).select().single();
+        if(errorRecibo){ desbloquear(); mostrarToast('No se pudo guardar.'); console.error(errorRecibo); return; }
+        reciboId = recibo.id;
+      }
 
       payload.usuario_id = usuarioId;
       payload.empresa_id = ESTADO.empresaActual;
-      payload.recibo_id = recibo.id;
+      payload.recibo_id = reciboId;
       payload.gasto_recurrente_id = gastoRecurrenteId;
       ({ error } = await sb.from('caja_chica_gastos').insert(payload));
 
@@ -5991,9 +6097,12 @@ async function abrirNotasCajaChica(usuarioId, fecha, nombreUsuario, alCerrar){
     <h3>Notas — ${nombreUsuario} — ${fmtFecha(fecha)}</h3>
     <div id="hilo-notas-caja-chica" style="max-height:260px; overflow-y:auto; margin-bottom:14px; display:flex; flex-direction:column; gap:10px;">
       ${data && data.length ? data.map(n => `
-        <div style="background:var(--paper); border-radius:var(--radius-sm); padding:10px 12px;">
-          <div style="font-size:11.5px; font-weight:800; color:var(--ink-soft); margin-bottom:3px;">${nombresPorId[n.autor_id] || 'Alguien'} · ${new Intl.DateTimeFormat('es-GT', {dateStyle:'short', timeStyle:'short'}).format(new Date(n.creado_en))}</div>
-          <div style="font-size:13.5px;">${n.mensaje}</div>
+        <div style="background:var(--paper); border-radius:var(--radius-sm); padding:10px 12px; display:flex; justify-content:space-between; gap:10px; align-items:flex-start;">
+          <div>
+            <div style="font-size:11.5px; font-weight:800; color:var(--ink-soft); margin-bottom:3px;">${nombresPorId[n.autor_id] || 'Alguien'} · ${new Intl.DateTimeFormat('es-GT', {dateStyle:'short', timeStyle:'short'}).format(new Date(n.creado_en))}</div>
+            <div style="font-size:13.5px;">${n.mensaje}</div>
+          </div>
+          ${ESTADO.usuario.rol === 'administrador' ? `<button type="button" class="btn btn-ghost btn-sm" data-eliminar-nota="${n.id}" title="Eliminar nota" style="flex:none;">✕</button>` : ''}
         </div>
       `).join('') : '<div class="vacio">Todavía no hay notas para este día.</div>'}
     </div>
@@ -6006,6 +6115,15 @@ async function abrirNotasCajaChica(usuarioId, fecha, nombreUsuario, alCerrar){
     </form>
   `);
   document.getElementById('btn-cerrar-notas-caja-chica').addEventListener('click', ()=>{ cerrarModal(); alCerrar(); });
+  document.querySelectorAll('[data-eliminar-nota]').forEach(b=>{
+    b.addEventListener('click', async ()=>{
+      if(!confirm('¿Eliminar esta nota? No se puede deshacer.')) return;
+      const { error } = await sb.from('caja_chica_notas').delete().eq('id', b.dataset.eliminarNota);
+      if(error){ mostrarToast('No se pudo eliminar.'); return; }
+      cerrarModal();
+      abrirNotasCajaChica(usuarioId, fecha, nombreUsuario, alCerrar);
+    });
+  });
   document.getElementById('form-nueva-nota-caja-chica').addEventListener('submit', async (ev)=>{
     ev.preventDefault();
     const fd = new FormData(ev.target);
@@ -6072,7 +6190,7 @@ function exportarCajaChicaPDF(nombreUsuario, nombreMes, diasAMostrar, anio, mes,
   window.print();
 }
 
-function abrirFormAsignacionDiaria(usuarioId, fecha, montoSugerido, alGuardar){
+function abrirFormAsignacionDiaria(usuarioId, fecha, montoSugerido, alGuardar, yaExistia){
   abrirModal(`
     <h3>Asignar monto — ${fmtFecha(fecha)}</h3>
     <div style="font-size:12.5px; color:var(--ink-soft); margin-bottom:14px;">Cuánto se le entregó en efectivo esta persona ese día.</div>
@@ -6080,11 +6198,21 @@ function abrirFormAsignacionDiaria(usuarioId, fecha, montoSugerido, alGuardar){
       <div class="campo-inline"><label>Monto entregado</label><input name="monto" type="number" step="0.01" min="0.01" value="${montoSugerido || ''}" required></div>
       <div class="modal-acciones">
         <button type="button" class="btn btn-ghost" id="btn-cancelar-asignacion">Cancelar</button>
+        ${yaExistia ? `<button type="button" class="btn btn-ghost" id="btn-quitar-asignacion" style="color:#B23B3B;">Quitar asignación</button>` : ''}
         <button type="submit" class="btn btn-primary">Guardar</button>
       </div>
     </form>
   `);
   document.getElementById('btn-cancelar-asignacion').addEventListener('click', cerrarModal);
+  document.getElementById('btn-quitar-asignacion')?.addEventListener('click', async ()=>{
+    if(!confirm('¿Quitar por completo la asignación de este día? Vuelve a quedar "Sin asignar".')) return;
+    const { error } = await sb.from('caja_chica_asignaciones').delete().eq('usuario_id', usuarioId).eq('fecha', fecha);
+    if(error){ mostrarToast('No se pudo quitar.'); return; }
+    registrarAuditoria('caja_chica_asignaciones', usuarioId, 'eliminar', fmtFecha(fecha));
+    cerrarModal();
+    mostrarToast('Asignación quitada.');
+    alGuardar();
+  });
   document.getElementById('form-asignacion-diaria').addEventListener('submit', async (ev)=>{
     ev.preventDefault();
     const fd = new FormData(ev.target);
