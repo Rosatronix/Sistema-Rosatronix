@@ -868,14 +868,20 @@ document.addEventListener('click', ()=>{
 async function cargarNotificaciones(){
   const hoy = new Date().toISOString().slice(0, 10);
   const inicioMes = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0, 10);
+  const verCxp = tienePermiso('cuentas_por_pagar', 'puede_ver');
+  const verCxc = tienePermiso('cuentas_por_cobrar', 'puede_ver');
+  const verGastosRec = tienePermiso('gastos_recurrentes', 'puede_ver');
+  const verCuentas = tienePermiso('cuentas', 'puede_ver');
+  const verReportes = tienePermiso('reportes', 'puede_ver');
+
   const [cxpVencidas, cxcVencidas, gastosRec, cuentasBajas, categoriasPresupuesto, recibosMes, pagosMes] = await Promise.all([
-    sb.from('cuentas_por_pagar').select('id, numero_documento, fecha_vencimiento, proveedores(nombre)').eq('empresa_id', ESTADO.empresaActual).neq('estatus', 'pagado').lt('fecha_vencimiento', hoy),
-    sb.from('cuentas_por_cobrar').select('id, numero_documento, fecha_vencimiento, clientes_credito(nombre)').eq('empresa_id', ESTADO.empresaActual).neq('estatus', 'cobrado').lt('fecha_vencimiento', hoy),
-    sb.from('gastos_recurrentes').select('id, nombre, proximo_vencimiento, recordatorio_dias_antes').eq('empresa_id', ESTADO.empresaActual).eq('activo', true),
-    sb.from('cuentas').select('id, nombre, saldo_actual, saldo_minimo').eq('empresa_id', ESTADO.empresaActual).eq('activo', true).not('saldo_minimo', 'is', null),
-    sb.from('categorias_gasto').select('id, nombre, presupuesto_mensual').eq('empresa_id', ESTADO.empresaActual).not('presupuesto_mensual', 'is', null),
-    sb.from('recibos').select('monto, categoria_id').eq('empresa_id', ESTADO.empresaActual).eq('tipo', 'egreso').gte('fecha', inicioMes),
-    sb.from('pagos_realizados').select('monto, cuentas_por_pagar(categoria_id)').eq('empresa_id', ESTADO.empresaActual).gte('fecha_pago', inicioMes),
+    verCxp ? sb.from('cuentas_por_pagar').select('id, numero_documento, fecha_vencimiento, proveedores(nombre)').eq('empresa_id', ESTADO.empresaActual).neq('estatus', 'pagado').lt('fecha_vencimiento', hoy) : Promise.resolve({ data: [] }),
+    verCxc ? sb.from('cuentas_por_cobrar').select('id, numero_documento, fecha_vencimiento, clientes_credito(nombre)').eq('empresa_id', ESTADO.empresaActual).neq('estatus', 'cobrado').lt('fecha_vencimiento', hoy) : Promise.resolve({ data: [] }),
+    verGastosRec ? sb.from('gastos_recurrentes').select('id, nombre, proximo_vencimiento, recordatorio_dias_antes').eq('empresa_id', ESTADO.empresaActual).eq('activo', true) : Promise.resolve({ data: [] }),
+    verCuentas ? sb.from('cuentas').select('id, nombre, saldo_actual, saldo_minimo').eq('empresa_id', ESTADO.empresaActual).eq('activo', true).not('saldo_minimo', 'is', null) : Promise.resolve({ data: [] }),
+    verReportes ? sb.from('categorias_gasto').select('id, nombre, presupuesto_mensual').eq('empresa_id', ESTADO.empresaActual).not('presupuesto_mensual', 'is', null) : Promise.resolve({ data: [] }),
+    verReportes ? sb.from('recibos').select('monto, categoria_id').eq('empresa_id', ESTADO.empresaActual).eq('tipo', 'egreso').gte('fecha', inicioMes) : Promise.resolve({ data: [] }),
+    verReportes ? sb.from('pagos_realizados').select('monto, cuentas_por_pagar(categoria_id)').eq('empresa_id', ESTADO.empresaActual).gte('fecha_pago', inicioMes) : Promise.resolve({ data: [] }),
   ]);
 
   const items = [];
